@@ -9,11 +9,13 @@ interface Props {
   onNameChange: (name: string) => void
   onSave: () => void
   onAddNode: () => void
+  onRun: () => void
   saving?: boolean
   saveMsg?: string
+  running?: boolean
 }
 
-export default function EditorToolbar({ workflowName, onNameChange, onSave, onAddNode, saving, saveMsg }: Props) {
+export default function EditorToolbar({ workflowName, onNameChange, onSave, onAddNode, onRun, saving, saveMsg, running }: Props) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(workflowName)
 
@@ -70,8 +72,12 @@ export default function EditorToolbar({ workflowName, onNameChange, onSave, onAd
           {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
           저장
         </button>
-        <button className="flex items-center gap-1.5 text-sm font-medium bg-violet-600 hover:bg-violet-700 text-white px-4 py-1.5 rounded-lg transition-colors">
-          <Play className="w-4 h-4" />
+        <button
+          onClick={onRun}
+          disabled={running}
+          className="flex items-center gap-1.5 text-sm font-medium bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg transition-colors"
+        >
+          {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
           실행
         </button>
       </div>

@@ -1,15 +1,17 @@
+from __future__ import annotations
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import Any, Optional
 from uuid import UUID
 from app.db.supabase import get_supabase_admin
+from app.services.executor import run_workflow
 
 router = APIRouter(prefix="/executions", tags=["executions"])
 
 
 class ExecutionCreate(BaseModel):
     workflow_id: str
-    trigger_data: dict[str, Any] = {}
+    trigger_data: dict = {}
     triggered_by: str
 
 
@@ -17,13 +19,13 @@ class ExecutionCreate(BaseModel):
 async def start_execution(body: ExecutionCreate, background_tasks: BackgroundTasks):
     sb = get_supabase_admin()
 
-    workflow = sb.table("workflows").select("*, workflow_versions!current_version_id(*)").eq("id", body.workflow_id).single().execute()
+    workflow = sb.table("workflows").select("id, status, current_version_id").eq("id", body.workflow_id).single().execute()
     if not workflow.data:
         raise HTTPException(status_code=404, detail="워크플로우를 찾을 수 없습니다")
-    if workflow.data["status"] != "active":
-        raise HTTPException(status_code=400, detail="비활성화된 워크플로우입니다")
 
-    version_id = workflow.data["current_version_id"]
+    version_id = workflow.data.get("current_version_id")
+    if not version_id:
+        raise HTTPException(status_code=400, detail="저장된 버전이 없습니다. 먼저 저장해주세요")
 
     execution = sb.table("executions").insert({
         "workflow_id": body.workflow_id,
@@ -34,21 +36,10 @@ async def start_execution(body: ExecutionCreate, background_tasks: BackgroundTas
         "status": "queued",
     }).execute().data[0]
 
-    sb.table("execution_queue").insert({
-        "execution_id": execution["id"],
-        "priority": 5,
-    }).execute()
+    # 워크플로우 실행 (백그라운드)
+    background_tasks.add_task(run_workflow, execution["id"])
 
-    background_tasks.add_task(_run_execution, execution["id"])
     return {"execution_id": execution["id"], "status": "queued"}
-
-
-async def _run_execution(execution_id: str):
-    """실행 엔진 — 추후 Celery worker로 이관"""
-    sb = get_supabase_admin()
-    sb.table("executions").update({"status": "running", "started_at": "now()"}).eq("id", execution_id).execute()
-    # TODO: 노드 순서대로 실행
-    sb.table("executions").update({"status": "success", "finished_at": "now()"}).eq("id", execution_id).execute()
 
 
 @router.get("/{execution_id}")
@@ -63,7 +54,15 @@ async def get_execution(execution_id: UUID):
 @router.get("/")
 async def list_executions(workflow_id: str, limit: int = 20, offset: int = 0):
     sb = get_supabase_admin()
-    res = sb.table("executions").select("id, status, trigger_type, queued_at, started_at, finished_at, duration_ms").eq("workflow_id", workflow_id).order("created_at", desc=True).limit(limit).offset(offset).execute()
+    res = (
+        sb.table("executions")
+        .select("id, status, trigger_type, queued_at, started_at, finished_at, duration_ms, nodes_total, nodes_success, nodes_failed")
+        .eq("workflow_id", workflow_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .offset(offset)
+        .execute()
+    )
     return res.data
 
 

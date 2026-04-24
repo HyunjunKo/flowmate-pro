@@ -19,8 +19,11 @@ import {
 import '@xyflow/react/dist/style.css'
 import NodePanel from './NodePanel'
 import NodeSettingsPanel from './NodeSettingsPanel'
+import ExecutionPanel from './ExecutionPanel'
 import CustomNode from './CustomNode'
 import EditorToolbar from './EditorToolbar'
+import { startExecution } from '@/lib/api/backend'
+import { createClient } from '@/lib/supabase/client'
 import {
   createWorkflow,
   getWorkflow,
@@ -61,6 +64,8 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
   const [loading, setLoading] = useState(workflowId !== 'new')
+  const [running, setRunning] = useState(false)
+  const [executionId, setExecutionId] = useState<string | null>(null)
 
   useEffect(() => {
     if (workflowId === 'new') return
@@ -124,6 +129,27 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
     setSelectedNode(newNode)  // 추가하면 바로 설정 패널 열기
   }, [nodes.length, setNodes])
 
+  const handleRun = async () => {
+    if (!currentWorkflowId) {
+      alert('먼저 저장해주세요')
+      return
+    }
+    setRunning(true)
+    setSelectedNode(null)
+    setIsPanelOpen(false)
+    try {
+      const supabase = createClient()
+      const { data: { user } } = await supabase.auth.getUser()
+      const result = await startExecution(currentWorkflowId, user?.id ?? '')
+      setExecutionId(result.execution_id)
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : '실행 실패'
+      setSaveMsg(msg)
+    } finally {
+      setRunning(false)
+    }
+  }
+
   const handleSave = async () => {
     setSaving(true)
     setSaveMsg('')
@@ -155,7 +181,14 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
     )
   }
 
-  const rightPanel = selectedNode
+  const rightPanel = executionId
+    ? (
+      <ExecutionPanel
+        executionId={executionId}
+        onClose={() => setExecutionId(null)}
+      />
+    )
+    : selectedNode
     ? (
       <NodeSettingsPanel
         nodeId={selectedNode.id}
@@ -176,9 +209,11 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
         workflowName={workflowName}
         onNameChange={setWorkflowName}
         onSave={handleSave}
+        onRun={handleRun}
         onAddNode={() => { setSelectedNode(null); setIsPanelOpen(true) }}
         saving={saving}
         saveMsg={saveMsg}
+        running={running}
       />
 
       <div className="flex flex-1 overflow-hidden">
