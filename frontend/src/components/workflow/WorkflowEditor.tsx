@@ -14,9 +14,11 @@ import {
   type NodeTypes,
   type Edge,
   type Node,
+  type NodeMouseHandler,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import NodePanel from './NodePanel'
+import NodeSettingsPanel from './NodeSettingsPanel'
 import CustomNode from './CustomNode'
 import EditorToolbar from './EditorToolbar'
 import {
@@ -51,6 +53,7 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>(defaultNodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
   const [isPanelOpen, setIsPanelOpen] = useState(false)
+  const [selectedNode, setSelectedNode] = useState<Node | null>(null)
   const [workflowName, setWorkflowName] = useState('새 워크플로우')
   const [currentWorkflowId, setCurrentWorkflowId] = useState<string | null>(
     workflowId === 'new' ? null : workflowId
@@ -59,10 +62,8 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
   const [saveMsg, setSaveMsg] = useState('')
   const [loading, setLoading] = useState(workflowId !== 'new')
 
-  // 기존 워크플로우 불러오기
   useEffect(() => {
     if (workflowId === 'new') return
-
     const load = async () => {
       try {
         const [workflow, version] = await Promise.all([
@@ -88,6 +89,23 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
     [setEdges]
   )
 
+  const onNodeClick: NodeMouseHandler = useCallback((_event, node) => {
+    setIsPanelOpen(false)
+    setSelectedNode(node)
+  }, [])
+
+  const onPaneClick = useCallback(() => {
+    setSelectedNode(null)
+  }, [])
+
+  const handleNodeUpdate = useCallback((nodeId: string, config: Record<string, unknown>) => {
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === nodeId ? { ...n, data: { ...n.data, config } } : n
+      )
+    )
+  }, [setNodes])
+
   const addNode = useCallback((nodeData: {
     label: string
     description: string
@@ -103,6 +121,7 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
     }
     setNodes((nds) => [...nds, newNode])
     setIsPanelOpen(false)
+    setSelectedNode(newNode)  // 추가하면 바로 설정 패널 열기
   }, [nodes.length, setNodes])
 
   const handleSave = async () => {
@@ -110,8 +129,6 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
     setSaveMsg('')
     try {
       let wfId = currentWorkflowId
-
-      // 새 워크플로우면 먼저 생성
       if (!wfId) {
         const wf = await createWorkflow(workflowName)
         wfId = wf.id
@@ -120,11 +137,10 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
       } else {
         await updateWorkflow(wfId, { name: workflowName })
       }
-
       await saveVersion(wfId, nodes, edges)
       setSaveMsg('저장됨')
       setTimeout(() => setSaveMsg(''), 2000)
-    } catch (e) {
+    } catch {
       setSaveMsg('저장 실패')
     } finally {
       setSaving(false)
@@ -139,13 +155,28 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
     )
   }
 
+  const rightPanel = selectedNode
+    ? (
+      <NodeSettingsPanel
+        nodeId={selectedNode.id}
+        nodeData={selectedNode.data as {
+          label: string; description: string; nodeType: string; icon: string; nodeKey?: string; config?: Record<string, unknown>
+        }}
+        onClose={() => setSelectedNode(null)}
+        onUpdate={handleNodeUpdate}
+      />
+    )
+    : isPanelOpen
+      ? <NodePanel onAdd={addNode} onClose={() => setIsPanelOpen(false)} />
+      : null
+
   return (
     <div className="flex h-screen flex-col">
       <EditorToolbar
         workflowName={workflowName}
         onNameChange={setWorkflowName}
         onSave={handleSave}
-        onAddNode={() => setIsPanelOpen(true)}
+        onAddNode={() => { setSelectedNode(null); setIsPanelOpen(true) }}
         saving={saving}
         saveMsg={saveMsg}
       />
@@ -158,6 +189,8 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            onNodeClick={onNodeClick}
+            onPaneClick={onPaneClick}
             nodeTypes={nodeTypes}
             fitView
             className="bg-gray-50"
@@ -177,9 +210,7 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
           )}
         </div>
 
-        {isPanelOpen && (
-          <NodePanel onAdd={addNode} onClose={() => setIsPanelOpen(false)} />
-        )}
+        {rightPanel}
       </div>
     </div>
   )
