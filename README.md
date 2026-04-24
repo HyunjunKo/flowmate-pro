@@ -6,6 +6,10 @@
 > 코딩 지식 없이도 누구나 사용할 수 있습니다.
 
 ---
+##Demo id
+이메일	demo@flowmate.pro
+비밀번호	flowmate2026!
+
 
 ## 주요 기능
 
