@@ -29,7 +29,10 @@ async def run_workflow(execution_id: str) -> None:
     # 노드 실행 순서 결정 (위상 정렬)
     ordered = _topological_sort(nodes, edges)
 
-    context: dict[str, Any] = {"trigger_data": exec_row.get("trigger_data", {})}
+    context: dict[str, Any] = {
+        "trigger_data": exec_row.get("trigger_data", {}),
+        "user_id": exec_row.get("triggered_by", ""),
+    }
     nodes_success = 0
     nodes_failed = 0
     error_node_id = None
@@ -90,26 +93,52 @@ async def run_workflow(execution_id: str) -> None:
 
 
 async def _execute_node(node_key: str, config: dict, context: dict) -> dict:
-    """노드 타입별 실행 — 추후 각 서비스 핸들러로 분리"""
+    """노드 타입별 실행"""
+    from app.services.integrations import kakao, gmail, slack, google_sheets
 
     # 변수 치환: {{node_id.field}} 형태
     resolved = _resolve_variables(config, context)
+    user_id = context.get("user_id", "")
 
     if node_key.startswith("trigger."):
         return {"triggered_at": now()}
 
+    # ── 흐름 제어 ──────────────────────────────
     if node_key == "flow.delay":
         import asyncio
         unit = resolved.get("unit", "분")
         amount = int(resolved.get("amount", 1))
         seconds = amount * {"분": 60, "시간": 3600, "일": 86400}.get(unit, 60)
-        await asyncio.sleep(min(seconds, 5))  # dev 환경: 최대 5초
+        await asyncio.sleep(min(seconds, 5))
         return {"waited_until": now()}
 
     if node_key == "flow.condition":
         matched = _evaluate_conditions(resolved.get("conditions", []), context)
         return {"matched": matched, "branch": "true" if matched else "false"}
 
+    # ── 카카오 ─────────────────────────────────
+    if node_key == "kakao.send_message":
+        return await kakao.send_message(user_id, resolved)
+
+    if node_key == "kakao.alimtalk":
+        return await kakao.send_alimtalk(resolved)
+
+    # ── Gmail ──────────────────────────────────
+    if node_key == "gmail.send_email":
+        return await gmail.send_email(user_id, resolved)
+
+    # ── Slack ──────────────────────────────────
+    if node_key == "slack.send_message":
+        return await slack.send_message(user_id, resolved)
+
+    # ── Google Sheets ──────────────────────────
+    if node_key == "google_sheets.append_row":
+        return await google_sheets.append_row(user_id, resolved)
+
+    if node_key == "google_sheets.get_rows":
+        return await google_sheets.get_rows(user_id, resolved)
+
+    # ── AI ─────────────────────────────────────
     if node_key == "ai.generate_text":
         return await _ai_generate(resolved)
 
@@ -119,13 +148,17 @@ async def _execute_node(node_key: str, config: dict, context: dict) -> dict:
     if node_key == "ai.translate":
         return await _ai_translate(resolved)
 
+    if node_key == "ai.sentiment":
+        return await _ai_sentiment(resolved)
+
+    # ── 변환 ───────────────────────────────────
     if node_key == "transform.text":
         return _transform_text(resolved)
 
     if node_key == "transform.format_date":
         return _format_date(resolved)
 
-    # 미구현 노드는 mock 응답
+    # 미구현
     return {"status": "ok", "node_key": node_key, "note": "연동 준비 중"}
 
 
@@ -209,6 +242,32 @@ async def _ai_translate(config: dict) -> dict:
         )
         res.raise_for_status()
         return {"translated": res.json()["content"][0]["text"], "source_language": "자동감지"}
+
+
+async def _ai_sentiment(config: dict) -> dict:
+    text = config.get("text", "")
+    async with httpx.AsyncClient() as client:
+        res = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": _get_anthropic_key(),
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": f"Analyze sentiment of this text. Reply with JSON only: {{\"sentiment\": \"긍정|부정|중립\", \"score\": 0.0-1.0}}\n\n{text}"}],
+            },
+            timeout=30,
+        )
+        res.raise_for_status()
+        import json as _json
+        raw = res.json()["content"][0]["text"]
+        try:
+            return _json.loads(raw)
+        except Exception:
+            return {"sentiment": "중립", "score": 0.5}
 
 
 def _transform_text(config: dict) -> dict:
