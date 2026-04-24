@@ -1,6 +1,7 @@
 'use client'
 
-import { useCallback, useState } from 'react'
+import { useCallback, useState, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
 import {
   ReactFlow,
   addEdge,
@@ -12,17 +13,25 @@ import {
   type Connection,
   type NodeTypes,
   type Edge,
+  type Node,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import NodePanel from './NodePanel'
 import CustomNode from './CustomNode'
 import EditorToolbar from './EditorToolbar'
+import {
+  createWorkflow,
+  getWorkflow,
+  updateWorkflow,
+  saveVersion,
+  loadCurrentVersion,
+} from '@/lib/api/workflows'
 
 const nodeTypes: NodeTypes = {
   custom: CustomNode,
 }
 
-const initialNodes = [
+const defaultNodes: Node[] = [
   {
     id: 'trigger-1',
     type: 'custom',
@@ -32,17 +41,47 @@ const initialNodes = [
       description: '워크플로우가 시작되는 지점',
       nodeType: 'trigger',
       icon: '⚡',
+      nodeKey: 'trigger.manual',
     },
   },
 ]
 
 export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
-  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
+  const router = useRouter()
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>(defaultNodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
   const [isPanelOpen, setIsPanelOpen] = useState(false)
-  const [workflowName, setWorkflowName] = useState(
-    workflowId === 'new' ? '새 워크플로우' : '워크플로우 로딩 중...'
+  const [workflowName, setWorkflowName] = useState('새 워크플로우')
+  const [currentWorkflowId, setCurrentWorkflowId] = useState<string | null>(
+    workflowId === 'new' ? null : workflowId
   )
+  const [saving, setSaving] = useState(false)
+  const [saveMsg, setSaveMsg] = useState('')
+  const [loading, setLoading] = useState(workflowId !== 'new')
+
+  // 기존 워크플로우 불러오기
+  useEffect(() => {
+    if (workflowId === 'new') return
+
+    const load = async () => {
+      try {
+        const [workflow, version] = await Promise.all([
+          getWorkflow(workflowId),
+          loadCurrentVersion(workflowId),
+        ])
+        setWorkflowName(workflow.name)
+        if (version) {
+          setNodes(version.nodes as Node[])
+          setEdges(version.edges as Edge[])
+        }
+      } catch {
+        setSaveMsg('워크플로우를 불러오지 못했습니다')
+      } finally {
+        setLoading(false)
+      }
+    }
+    load()
+  }, [workflowId, setNodes, setEdges])
 
   const onConnect = useCallback(
     (params: Connection) => setEdges((eds) => addEdge({ ...params, animated: true }, eds) as Edge[]),
@@ -56,19 +95,48 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
     icon: string
     nodeKey?: string
   }) => {
-    const newNode = {
+    const newNode: Node = {
       id: `node-${Date.now()}`,
       type: 'custom',
-      position: { x: 250 + Math.random() * 100, y: 200 + nodes.length * 120 },
+      position: { x: 200 + Math.random() * 150, y: 150 + nodes.length * 130 },
       data: nodeData,
     }
     setNodes((nds) => [...nds, newNode])
     setIsPanelOpen(false)
   }, [nodes.length, setNodes])
 
-  const handleSave = () => {
-    // TODO: API 저장
-    alert('저장됨 (API 연동 예정)')
+  const handleSave = async () => {
+    setSaving(true)
+    setSaveMsg('')
+    try {
+      let wfId = currentWorkflowId
+
+      // 새 워크플로우면 먼저 생성
+      if (!wfId) {
+        const wf = await createWorkflow(workflowName)
+        wfId = wf.id
+        setCurrentWorkflowId(wfId)
+        router.replace(`/dashboard/workflows/${wfId}`)
+      } else {
+        await updateWorkflow(wfId, { name: workflowName })
+      }
+
+      await saveVersion(wfId, nodes, edges)
+      setSaveMsg('저장됨')
+      setTimeout(() => setSaveMsg(''), 2000)
+    } catch (e) {
+      setSaveMsg('저장 실패')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center">
+        <div className="text-sm text-gray-400">불러오는 중...</div>
+      </div>
+    )
   }
 
   return (
@@ -78,6 +146,8 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
         onNameChange={setWorkflowName}
         onSave={handleSave}
         onAddNode={() => setIsPanelOpen(true)}
+        saving={saving}
+        saveMsg={saveMsg}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -100,10 +170,9 @@ export default function WorkflowEditor({ workflowId }: { workflowId: string }) {
             />
           </ReactFlow>
 
-          {/* 노드 추가 힌트 */}
           {nodes.length <= 1 && (
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 mt-20 text-center pointer-events-none">
-              <p className="text-sm text-gray-400">+ 노드 추가 버튼을 눌러 작업을 추가해보세요</p>
+              <p className="text-sm text-gray-400">노드 추가 버튼을 눌러 작업을 추가해보세요</p>
             </div>
           )}
         </div>

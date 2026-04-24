@@ -2,16 +2,18 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
-import { ChevronLeft, Plus, Save, Play } from 'lucide-react'
+import { ChevronLeft, Plus, Save, Play, Loader2, CheckCircle } from 'lucide-react'
 
 interface Props {
   workflowName: string
   onNameChange: (name: string) => void
   onSave: () => void
   onAddNode: () => void
+  saving?: boolean
+  saveMsg?: string
 }
 
-export default function EditorToolbar({ workflowName, onNameChange, onSave, onAddNode }: Props) {
+export default function EditorToolbar({ workflowName, onNameChange, onSave, onAddNode, saving, saveMsg }: Props) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(workflowName)
 
@@ -54,11 +56,18 @@ export default function EditorToolbar({ workflowName, onNameChange, onSave, onAd
           <Plus className="w-4 h-4" />
           노드 추가
         </button>
+        {saveMsg && (
+          <span className="flex items-center gap-1 text-xs text-green-600">
+            <CheckCircle className="w-3.5 h-3.5" />
+            {saveMsg}
+          </span>
+        )}
         <button
           onClick={onSave}
-          className="flex items-center gap-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors"
+          disabled={saving}
+          className="flex items-center gap-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors disabled:opacity-50"
         >
-          <Save className="w-4 h-4" />
+          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
           저장
         </button>
         <button className="flex items-center gap-1.5 text-sm font-medium bg-violet-600 hover:bg-violet-700 text-white px-4 py-1.5 rounded-lg transition-colors">

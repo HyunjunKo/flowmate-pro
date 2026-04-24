@@ -6,14 +6,22 @@ export default async function DashboardPage() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
 
-  // 워크플로우 목록 (추후 실제 DB 연동)
-  const workflows: Array<{id: string; name: string; status: string; total_runs: number; success_runs: number; fail_runs: number; updated_at: string}> = []
+  const { data: workflows } = await supabase
+    .from('workflows')
+    .select('id, name, status, total_runs, success_runs, fail_runs, updated_at')
+    .eq('user_id', user!.id)
+    .neq('status', 'archived')
+    .order('updated_at', { ascending: false })
+
+  const wfList = workflows ?? []
+  const totalSuccess = wfList.reduce((s, w) => s + (w.success_runs ?? 0), 0)
+  const totalFail = wfList.reduce((s, w) => s + (w.fail_runs ?? 0), 0)
 
   const stats = [
-    { label: '전체 워크플로우', value: workflows.length, icon: Zap, color: 'text-violet-600', bg: 'bg-violet-50' },
-    { label: '이번 달 성공', value: 0, icon: CheckCircle, color: 'text-green-600', bg: 'bg-green-50' },
-    { label: '이번 달 실패', value: 0, icon: XCircle, color: 'text-red-600', bg: 'bg-red-50' },
-    { label: '대기 중', value: 0, icon: Clock, color: 'text-yellow-600', bg: 'bg-yellow-50' },
+    { label: '전체 워크플로우', value: wfList.length, icon: Zap, color: 'text-violet-600', bg: 'bg-violet-50' },
+    { label: '누적 성공', value: totalSuccess, icon: CheckCircle, color: 'text-green-600', bg: 'bg-green-50' },
+    { label: '누적 실패', value: totalFail, icon: XCircle, color: 'text-red-600', bg: 'bg-red-50' },
+    { label: '활성 워크플로우', value: wfList.filter(w => w.status === 'active').length, icon: Clock, color: 'text-yellow-600', bg: 'bg-yellow-50' },
   ]
 
   return (
@@ -48,7 +56,7 @@ export default async function DashboardPage() {
           </Link>
         </div>
 
-        {workflows.length === 0 ? (
+        {wfList.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="w-16 h-16 rounded-2xl bg-violet-50 flex items-center justify-center mb-4">
               <Zap className="w-8 h-8 text-violet-400" />
@@ -64,7 +72,7 @@ export default async function DashboardPage() {
           </div>
         ) : (
           <div className="divide-y divide-gray-50">
-            {workflows.map((wf) => (
+            {wfList.map((wf) => (
               <Link
                 key={wf.id}
                 href={`/dashboard/workflows/${wf.id}`}
