@@ -90,6 +90,70 @@ export async function deleteWorkflow(id: string) {
   if (error) throw error
 }
 
+export async function duplicateWorkflow(id: string): Promise<Workflow> {
+  const supabase = createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('로그인이 필요합니다')
+
+  // 원본 워크플로우 조회
+  const { data: original, error: wErr } = await supabase
+    .from('workflows')
+    .select('*')
+    .eq('id', id)
+    .single()
+  if (wErr || !original) throw new Error('워크플로우를 찾을 수 없습니다')
+
+  // 복제 생성
+  const { data: copy, error: cErr } = await supabase
+    .from('workflows')
+    .insert({
+      user_id: user.id,
+      name: `${original.name} (복사본)`,
+      description: original.description,
+      status: 'draft',
+      tags: original.tags ?? [],
+      icon: original.icon,
+      color: original.color,
+    })
+    .select()
+    .single()
+  if (cErr || !copy) throw cErr ?? new Error('복제 실패')
+
+  // 현재 버전 복제
+  if (original.current_version_id) {
+    const { data: ver } = await supabase
+      .from('workflow_versions')
+      .select('nodes, edges, variables')
+      .eq('id', original.current_version_id)
+      .single()
+
+    if (ver) {
+      const { data: newVer } = await supabase
+        .from('workflow_versions')
+        .insert({
+          workflow_id: copy.id,
+          version_number: 1,
+          nodes: ver.nodes,
+          edges: ver.edges,
+          variables: ver.variables,
+          created_by: user.id,
+          change_summary: '복제본 초기 버전',
+        })
+        .select()
+        .single()
+
+      if (newVer) {
+        await supabase
+          .from('workflows')
+          .update({ current_version_id: newVer.id })
+          .eq('id', copy.id)
+      }
+    }
+  }
+
+  return { ...copy, current_version_id: copy.current_version_id }
+}
+
 export async function saveVersion(
   workflowId: string,
   nodes: unknown[],
