@@ -1,6 +1,8 @@
 """워크플로우 실행 엔진"""
 from __future__ import annotations
+import asyncio
 import httpx
+import os
 from datetime import datetime, timezone
 from typing import Any
 from app.db.supabase import get_supabase_admin
@@ -13,7 +15,6 @@ def now() -> str:
 async def run_workflow(execution_id: str) -> None:
     sb = get_supabase_admin()
 
-    # 실행 정보 조회
     exec_row = sb.table("executions").select(
         "*, workflow_versions(nodes, edges)"
     ).eq("id", execution_id).single().execute().data
@@ -25,8 +26,6 @@ async def run_workflow(execution_id: str) -> None:
 
     nodes: list[dict] = exec_row["workflow_versions"]["nodes"]
     edges: list[dict] = exec_row["workflow_versions"]["edges"]
-
-    # 노드 실행 순서 결정 (위상 정렬)
     ordered = _topological_sort(nodes, edges)
 
     context: dict[str, Any] = {
@@ -40,7 +39,7 @@ async def run_workflow(execution_id: str) -> None:
     for node in ordered:
         node_id = node["id"]
         node_key = node["data"].get("nodeKey", "")
-        config = node["data"].get("config", {})
+        config = node["data"].get("config", {}) or {}
 
         log = sb.table("execution_node_logs").insert({
             "execution_id": execution_id,
@@ -83,7 +82,6 @@ async def run_workflow(execution_id: str) -> None:
         "output_data": context,
     }).eq("id", execution_id).execute()
 
-    # 워크플로우 통계 업데이트
     wf_id = exec_row["workflow_id"]
     sb.rpc("increment_workflow_stats", {
         "p_workflow_id": wf_id,
@@ -92,53 +90,82 @@ async def run_workflow(execution_id: str) -> None:
     }).execute()
 
 
-async def _execute_node(node_key: str, config: dict, context: dict) -> dict:
-    """노드 타입별 실행"""
-    from app.services.integrations import kakao, gmail, slack, google_sheets
+# ── 노드 실행 라우터 ────────────────────────────────────────────────────────────
 
-    # 변수 치환: {{node_id.field}} 형태
+async def _execute_node(node_key: str, config: dict, context: dict) -> dict:
+    from app.services.integrations import (
+        kakao, gmail, slack, google_sheets, google_calendar, notion, naver
+    )
+
     resolved = _resolve_variables(config, context)
     user_id = context.get("user_id", "")
 
+    # ── 트리거 ──────────────────────────────────────────────────────────────────
     if node_key.startswith("trigger."):
-        return {"triggered_at": now()}
+        return {"triggered_at": now(), **context.get("trigger_data", {})}
 
-    # ── 흐름 제어 ──────────────────────────────
+    # ── 흐름 제어 ────────────────────────────────────────────────────────────────
     if node_key == "flow.delay":
-        import asyncio
         unit = resolved.get("unit", "분")
         amount = int(resolved.get("amount", 1))
-        seconds = amount * {"분": 60, "시간": 3600, "일": 86400}.get(unit, 60)
-        await asyncio.sleep(min(seconds, 5))
-        return {"waited_until": now()}
+        seconds = amount * {"초": 1, "분": 60, "시간": 3600, "일": 86400}.get(unit, 60)
+        await asyncio.sleep(min(seconds, 30))
+        return {"waited_seconds": min(seconds, 30), "waited_until": now()}
 
     if node_key == "flow.condition":
         matched = _evaluate_conditions(resolved.get("conditions", []), context)
         return {"matched": matched, "branch": "true" if matched else "false"}
 
-    # ── 카카오 ─────────────────────────────────
+    if node_key == "flow.loop":
+        list_ref = resolved.get("list", "")
+        items = _get_nested(context, list_ref) if list_ref else []
+        if not isinstance(items, list):
+            items = [items] if items else []
+        if items:
+            return {"items": items, "item": items[0], "index": 0, "total": len(items)}
+        return {"items": [], "item": None, "index": 0, "total": 0}
+
+    # ── 카카오 ───────────────────────────────────────────────────────────────────
     if node_key == "kakao.send_message":
         return await kakao.send_message(user_id, resolved)
 
     if node_key == "kakao.alimtalk":
         return await kakao.send_alimtalk(resolved)
 
-    # ── Gmail ──────────────────────────────────
+    # ── 네이버 ───────────────────────────────────────────────────────────────────
+    if node_key == "naver.send_email":
+        return await naver.send_email(user_id, resolved)
+
+    if node_key == "naver.cafe_post":
+        return await naver.cafe_post(user_id, resolved)
+
+    # ── Gmail ─────────────────────────────────────────────────────────────────
     if node_key == "gmail.send_email":
         return await gmail.send_email(user_id, resolved)
 
-    # ── Slack ──────────────────────────────────
+    if node_key == "gmail.watch_inbox":
+        return {"triggered_at": now(), "note": "Gmail 트리거는 웹훅 설정 후 자동 실행됩니다"}
+
+    # ── Slack ─────────────────────────────────────────────────────────────────
     if node_key == "slack.send_message":
         return await slack.send_message(user_id, resolved)
 
-    # ── Google Sheets ──────────────────────────
+    # ── Google Sheets ─────────────────────────────────────────────────────────
     if node_key == "google_sheets.append_row":
         return await google_sheets.append_row(user_id, resolved)
 
     if node_key == "google_sheets.get_rows":
         return await google_sheets.get_rows(user_id, resolved)
 
-    # ── AI ─────────────────────────────────────
+    # ── Google Calendar ───────────────────────────────────────────────────────
+    if node_key == "google_calendar.create_event":
+        return await google_calendar.create_event(user_id, resolved)
+
+    # ── Notion ────────────────────────────────────────────────────────────────
+    if node_key == "notion.create_page":
+        return await notion.create_page(user_id, resolved)
+
+    # ── AI ────────────────────────────────────────────────────────────────────
     if node_key == "ai.generate_text":
         return await _ai_generate(resolved)
 
@@ -151,69 +178,71 @@ async def _execute_node(node_key: str, config: dict, context: dict) -> dict:
     if node_key == "ai.sentiment":
         return await _ai_sentiment(resolved)
 
-    # ── 변환 ───────────────────────────────────
+    # ── 변환 ─────────────────────────────────────────────────────────────────
     if node_key == "transform.text":
         return _transform_text(resolved)
 
     if node_key == "transform.format_date":
         return _format_date(resolved)
 
-    # 미구현
-    return {"status": "ok", "node_key": node_key, "note": "연동 준비 중"}
+    raise ValueError(f"지원하지 않는 노드입니다: '{node_key}'")
+
+
+# ── AI 핸들러 ─────────────────────────────────────────────────────────────────
+
+def _anthropic_headers() -> dict:
+    return {
+        "x-api-key": _get_anthropic_key(),
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
 
 
 async def _ai_generate(config: dict) -> dict:
     prompt = config.get("prompt", "")
     tone = config.get("tone", "친근하게")
-    max_length = config.get("max_length", 500)
-
+    max_length = int(config.get("max_length", 500))
     tone_map = {
         "친근하게": "friendly and warm",
         "공식적으로": "formal and professional",
         "간결하게": "concise and brief",
         "상세하게": "detailed and comprehensive",
     }
-
-    system = f"You are a helpful assistant. Write in Korean. Tone: {tone_map.get(tone, 'friendly')}. Max {max_length} characters."
-
+    system = (
+        f"You are a helpful assistant. Write in Korean. "
+        f"Tone: {tone_map.get(tone, 'friendly')}. Max {max_length} characters."
+    )
     async with httpx.AsyncClient() as client:
         res = await client.post(
             "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": _get_anthropic_key(),
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
+            headers=_anthropic_headers(),
             json={
                 "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 1024,
+                "max_tokens": min(max_length * 2, 2048),
                 "system": system,
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=30,
         )
         res.raise_for_status()
-        text = res.json()["content"][0]["text"]
-        return {"text": text[:max_length], "tokens_used": res.json()["usage"]["output_tokens"]}
+        data = res.json()
+        return {"text": data["content"][0]["text"][:max_length], "tokens_used": data["usage"]["output_tokens"]}
 
 
 async def _ai_summarize(config: dict) -> dict:
     text = config.get("text", "")
+    if not text.strip():
+        raise ValueError("요약할 텍스트를 입력해주세요")
     length_map = {"한 문장": "one sentence", "세 줄": "three bullet points", "다섯 줄": "five bullet points"}
     length = length_map.get(config.get("length", "세 줄"), "three bullet points")
-
     async with httpx.AsyncClient() as client:
         res = await client.post(
             "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": _get_anthropic_key(),
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
+            headers=_anthropic_headers(),
             json={
                 "model": "claude-haiku-4-5-20251001",
                 "max_tokens": 512,
-                "messages": [{"role": "user", "content": f"Summarize the following text in Korean in {length}:\n\n{text}"}],
+                "messages": [{"role": "user", "content": f"Summarize in Korean in {length}:\n\n{text}"}],
             },
             timeout=30,
         )
@@ -223,41 +252,41 @@ async def _ai_summarize(config: dict) -> dict:
 
 async def _ai_translate(config: dict) -> dict:
     text = config.get("text", "")
+    if not text.strip():
+        raise ValueError("번역할 텍스트를 입력해주세요")
     target = config.get("target_language", "영어")
-
+    lang_map = {
+        "영어": "English", "일본어": "Japanese", "중국어": "Chinese (Simplified)",
+        "스페인어": "Spanish", "프랑스어": "French", "독일어": "German",
+        "한국어": "Korean", "포르투갈어": "Portuguese", "러시아어": "Russian",
+    }
     async with httpx.AsyncClient() as client:
         res = await client.post(
             "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": _get_anthropic_key(),
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
+            headers=_anthropic_headers(),
             json={
                 "model": "claude-haiku-4-5-20251001",
                 "max_tokens": 1024,
-                "messages": [{"role": "user", "content": f"Translate to {target}. Reply with translation only:\n\n{text}"}],
+                "messages": [{"role": "user", "content": f"Translate to {lang_map.get(target, target)}. Reply with translation only:\n\n{text}"}],
             },
             timeout=30,
         )
         res.raise_for_status()
-        return {"translated": res.json()["content"][0]["text"], "source_language": "자동감지"}
+        return {"translated": res.json()["content"][0]["text"], "source_language": "자동감지", "target_language": target}
 
 
 async def _ai_sentiment(config: dict) -> dict:
     text = config.get("text", "")
+    if not text.strip():
+        raise ValueError("분석할 텍스트를 입력해주세요")
     async with httpx.AsyncClient() as client:
         res = await client.post(
             "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": _get_anthropic_key(),
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
+            headers=_anthropic_headers(),
             json={
                 "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 64,
-                "messages": [{"role": "user", "content": f"Analyze sentiment of this text. Reply with JSON only: {{\"sentiment\": \"긍정|부정|중립\", \"score\": 0.0-1.0}}\n\n{text}"}],
+                "max_tokens": 128,
+                "messages": [{"role": "user", "content": 'Analyze sentiment. Reply JSON only: {"sentiment":"긍정|부정|중립","score":0.0-1.0,"reason":"한 문장"}\n\n' + text}],
             },
             timeout=30,
         )
@@ -267,78 +296,114 @@ async def _ai_sentiment(config: dict) -> dict:
         try:
             return _json.loads(raw)
         except Exception:
-            return {"sentiment": "중립", "score": 0.5}
+            s = "긍정" if "긍정" in raw else "부정" if "부정" in raw else "중립"
+            return {"sentiment": s, "score": 0.75, "reason": raw}
 
+
+# ── 변환 핸들러 ────────────────────────────────────────────────────────────────
 
 def _transform_text(config: dict) -> dict:
     text = str(config.get("input", ""))
-    for op in config.get("operations", []):
-        if op == "대문자로": text = text.upper()
-        elif op == "소문자로": text = text.lower()
-        elif op == "앞뒤 공백 제거": text = text.strip()
-        elif op == "줄바꿈 제거": text = text.replace("\n", " ")
+    operations = config.get("operations", [])
+    if isinstance(operations, str):
+        operations = [operations]
+    for op in operations:
+        if op == "대문자로":          text = text.upper()
+        elif op == "소문자로":        text = text.lower()
+        elif op == "앞뒤 공백 제거":  text = text.strip()
+        elif op == "줄바꿈 제거":     text = text.replace("\n", " ").replace("\r", "")
         elif op == "특수문자 제거":
-            import re
-            text = re.sub(r"[^\w\s가-힣]", "", text)
-    return {"result": text}
+            import re; text = re.sub(r"[^\w\s가-힣]", "", text)
+        elif op == "HTML 태그 제거":
+            import re; text = re.sub(r"<[^>]+>", "", text)
+    return {"result": text, "length": len(text)}
 
 
 def _format_date(config: dict) -> dict:
-    from datetime import datetime
     import pendulum
     try:
-        dt = pendulum.parse(config.get("input", ""), strict=False) or pendulum.now("Asia/Seoul")
+        raw = config.get("input", "")
+        dt = pendulum.parse(raw, strict=False) if raw else pendulum.now("Asia/Seoul")
+        if dt is None:
+            dt = pendulum.now("Asia/Seoul")
     except Exception:
         dt = pendulum.now("Asia/Seoul")
-
+    kst = dt.in_timezone("Asia/Seoul")
     fmt = config.get("format", "YYYY-MM-DD")
     fmt_map = {
-        "YYYY년 MM월 DD일": dt.format("YYYY년 MM월 DD일"),
-        "YYYY-MM-DD": dt.format("YYYY-MM-DD"),
-        "MM/DD/YYYY": dt.format("MM/DD/YYYY"),
-        "오늘": pendulum.now("Asia/Seoul").format("YYYY-MM-DD"),
-        "어제": pendulum.now("Asia/Seoul").subtract(days=1).format("YYYY-MM-DD"),
-        "이번 주 월요일": pendulum.now("Asia/Seoul").start_of("week").format("YYYY-MM-DD"),
+        "YYYY년 MM월 DD일":  kst.format("YYYY년 MM월 DD일"),
+        "YYYY-MM-DD":        kst.format("YYYY-MM-DD"),
+        "MM/DD/YYYY":        kst.format("MM/DD/YYYY"),
+        "HH:mm":             kst.format("HH:mm"),
+        "YYYY-MM-DD HH:mm":  kst.format("YYYY-MM-DD HH:mm"),
+        "오늘":               pendulum.now("Asia/Seoul").format("YYYY-MM-DD"),
+        "어제":               pendulum.now("Asia/Seoul").subtract(days=1).format("YYYY-MM-DD"),
+        "이번 주 월요일":     pendulum.now("Asia/Seoul").start_of("week").format("YYYY-MM-DD"),
+        "이번 달 1일":        pendulum.now("Asia/Seoul").start_of("month").format("YYYY-MM-DD"),
     }
-    return {"result": fmt_map.get(fmt, dt.format("YYYY-MM-DD"))}
+    return {"result": fmt_map.get(fmt, kst.format("YYYY-MM-DD")), "iso": kst.isoformat()}
 
+
+# ── 조건 평가 ──────────────────────────────────────────────────────────────────
 
 def _evaluate_conditions(conditions: list, context: dict) -> bool:
+    if not conditions:
+        return True
     for cond in conditions:
         field = cond.get("field", "")
         op = cond.get("operator", "같다")
-        value = cond.get("value", "")
-        actual = str(_get_nested(context, field))
-        if op == "같다" and actual != value: return False
-        if op == "같지 않다" and actual == value: return False
-        if op == "포함한다" and value not in actual: return False
-        if op == "포함하지 않는다" and value in actual: return False
+        value = str(cond.get("value", ""))
+        actual = str(_get_nested(context, field) or "")
+        if op == "같다"           and actual != value:     return False
+        if op == "같지 않다"       and actual == value:     return False
+        if op == "포함한다"        and value not in actual: return False
+        if op == "포함하지 않는다"  and value in actual:     return False
+        if op == "보다 크다":
+            try:
+                if float(actual) <= float(value): return False
+            except ValueError: return False
+        if op == "보다 작다":
+            try:
+                if float(actual) >= float(value): return False
+            except ValueError: return False
+        if op == "비어있다"        and actual.strip():      return False
+        if op == "비어있지 않다"    and not actual.strip():  return False
     return True
 
 
+# ── 변수 치환 ──────────────────────────────────────────────────────────────────
+
 def _resolve_variables(config: dict, context: dict) -> dict:
     import re
-    result = {}
-    for k, v in config.items():
+
+    def _resolve(v: Any) -> Any:
         if isinstance(v, str):
-            def replacer(m):
-                return str(_get_nested(context, m.group(1)) or m.group(0))
-            result[k] = re.sub(r"\{\{(.+?)\}\}", replacer, v)
-        else:
-            result[k] = v
-    return result
+            def rep(m: re.Match) -> str:
+                r = _get_nested(context, m.group(1))
+                return str(r) if r is not None else m.group(0)
+            return re.sub(r"\{\{(.+?)\}\}", rep, v)
+        if isinstance(v, dict):
+            return {k: _resolve(val) for k, val in v.items()}
+        if isinstance(v, list):
+            return [_resolve(i) for i in v]
+        return v
+
+    return {k: _resolve(v) for k, v in config.items()}
 
 
-def _get_nested(data: dict, path: str) -> Any:
-    keys = path.split(".")
+def _get_nested(data: Any, path: str) -> Any:
+    if not path or not isinstance(data, dict):
+        return None
     cur = data
-    for k in keys:
+    for k in path.split("."):
         if isinstance(cur, dict):
             cur = cur.get(k)
         else:
             return None
     return cur
 
+
+# ── 위상 정렬 ──────────────────────────────────────────────────────────────────
 
 def _topological_sort(nodes: list, edges: list) -> list:
     node_map = {n["id"]: n for n in nodes}
@@ -347,26 +412,24 @@ def _topological_sort(nodes: list, edges: list) -> list:
 
     for e in edges:
         src, tgt = e.get("source"), e.get("target")
-        if src and tgt and src in adj:
+        if src and tgt and src in adj and tgt in in_degree:
             adj[src].append(tgt)
-            if tgt in in_degree:
-                in_degree[tgt] += 1
+            in_degree[tgt] += 1
 
     queue = [nid for nid, deg in in_degree.items() if deg == 0]
-    ordered = []
+    ordered: list = []
     while queue:
         nid = queue.pop(0)
-        ordered.append(node_map[nid])
+        if nid in node_map:
+            ordered.append(node_map[nid])
         for neighbor in adj.get(nid, []):
             in_degree[neighbor] -= 1
             if in_degree[neighbor] == 0:
                 queue.append(neighbor)
-
     return ordered
 
 
 def _get_anthropic_key() -> str:
-    import os
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
         raise ValueError("ANTHROPIC_API_KEY가 설정되지 않았습니다")
