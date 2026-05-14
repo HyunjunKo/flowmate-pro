@@ -41,6 +41,19 @@ class Settings(BaseSettings):
     NAVER_CLIENT_SECRET: str = ""
     NAVER_REDIRECT_URI: str = "http://localhost:3000/oauth/naver"
 
+    # Google
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = "http://localhost:3000/oauth/google"
+
+    # Slack
+    SLACK_CLIENT_ID: str = ""
+    SLACK_CLIENT_SECRET: str = ""
+    SLACK_REDIRECT_URI: str = "http://localhost:3000/oauth/slack"
+
+    # Anthropic
+    ANTHROPIC_API_KEY: str = ""
+
     @property
     def supabase_url(self) -> str:
         return self.NEXT_PUBLIC_SUPABASE_URL

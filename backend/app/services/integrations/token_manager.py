@@ -99,8 +99,8 @@ async def _refresh_google(refresh_token: str) -> tuple[str, str]:
     async with httpx.AsyncClient() as client:
         res = await client.post("https://oauth2.googleapis.com/token", data={
             "grant_type": "refresh_token",
-            "client_id": settings.KAKAO_CLIENT_ID,  # Google client_id
-            "client_secret": settings.KAKAO_CLIENT_SECRET,
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
             "refresh_token": refresh_token,
         })
         res.raise_for_status()
